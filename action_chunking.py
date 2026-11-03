@@ -168,7 +168,7 @@ def build_dataset(episodes, k=K):
             xs.append(encode_obs(obs))
             actions = [traj[j][1] for j in range(i, min(i + k, len(traj)))]
             while len(actions) < k:
-                actions.append([0.0, 0.0, 0.0])  # 补零动作
+                actions.append([0.0, 0.0, 0.0])  # 补零动作，缺几次补几次
             ys.append(actions)
     return torch.tensor(xs, dtype=torch.float32), torch.tensor(ys, dtype=torch.float32)  # 返回 (N, 8) 和 (N, k, 3)
     
@@ -236,10 +236,10 @@ def make_chunk_step_fn(model):
     def chunk_fn(obs):
         x = torch.tensor(encode_obs(obs), dtype=torch.float32).unsqueeze(0)  # (1, 8)
         with torch.no_grad():
-            out = model(x)[0]              # (k, 3)
+            out = model(x)[0]  # 前面在推理forward的时候已经将数据拍平为（1,4,3）（B=-1 Python自动计算了），[0]的意思为从列表里取出第0个样本（“4步3维”），目的是剥掉外层方便后续取出
         return out.tolist()
 
-    return chunk_fn
+    return chunk_fn               #返回的是函数（装饰器与工厂的差异），这样接口统一，不同输入不同输出，但统一接口
 
 
 # ============================================================
