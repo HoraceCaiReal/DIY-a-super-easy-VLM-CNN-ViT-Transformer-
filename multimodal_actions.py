@@ -352,12 +352,12 @@ def mdn_nll(logits, means, stds, target):
     # π 的对数：log_softmax 一步到位（比先 softmax 再 log 数值稳）
     log_pi = torch.log_softmax(logits, dim=-1)  # 计算log π_k,(B,K)
     
-    t = target.unsqueeze(1)  #(B,1,2)
-    z = (t-means)/stds
-    log_nmormal = (
-        - 0.5 * (z ** 2).sum(-1)                              # 二次项，对动作维求和
-        - stds.log().sum(-1)                                 # -log σ₁ - log σ₂
-        - means.shape[-1] * 0.5 * math.log(2 * math.pi)
+    t = target.unsqueeze(1)  #(B,1,2)，为了在z计算时能做广播，不然维度对不齐没法广播
+    z = (t-means)/stds   #计算两个峰的分别的偏σ的相对距离
+    log_nmormal = (           #二维高斯公式logN(a;μ,σ)
+        - 0.5 * (z ** 2).sum(-1)                             
+        - stds.log().sum(-1)                                 
+        - means.shape[-1] * 0.5 * math.log(2 * math.pi)           #三部分对应高斯公式取对数的三块
     )
     return -torch.logsumexp(log_pi + log_nmormal, dim=-1).mean()  # -log Σ_k π_k exp(logN_k) 对 batch 平均
     
@@ -373,14 +373,41 @@ def mdn_sample(logits, means, stds, generator=None):
     返回形状 (B,2) 的动作张量。提示：b = torch.arange(B); mu = means[b, idx]。
     """
     B = logits.shape[0]
-    pi = torch.softmax(logits, dim=-1)  # 计算 π_k
+    pi = torch.softmax(logits, dim=-1)  # 占比从原始分数成型，返回（B，2）
     
     idx = torch.multinomial(pi, num_samples=1, replacement=True, generator=generator).squeeze(-1)  # 按 π 抽分量号 k
-    b = torch.arange(B)
+    """
+    num_samples=1：每个样本抽一次；
+    replacement=True：有放回（抽 1 个时无影响，习惯写法）；
+    generator=generator：用外面传入的骰子——mdn_policy_fn 里 gen = torch.Generator().manual_seed(seed)。
+    这是为了让评测可复现：同样的种子，每次跑出同样的轨迹序列，失败案例能稳定重现、方便 debug。这是做实验的基本功：随机性可以有，但必须可控制
+    
+    """
+    b = torch.arange(B)  # 0..B-1 的索引，和 idx 一起做花式索引取出对应分量的均值和标准差
     mu = means[b, idx]  # 取出对应分量的均值
-    sigma = stds[b, idx]  # 取出对应分量的标准差
+    """
+    means[b, idx] 是 PyTorch 的花式索引（fancy indexing）：给两个等长数组，就“并行地”按对取值。具体到 B=3 的例子：
+    b   = [0, 1, 2]
+    idx = [1, 0, 1]            ← 三个样本分别抽中了堆2、堆1、堆2
+
+    means[b, idx] 取出：
+      means[0, 1]  → 样本0 的堆2中心
+      means[1, 0]  → 样本1 的堆1中心
+      means[2, 1]  → 样本2 的堆2中心
+    结果 (3, 2)
+     
+    sigma = stds[b, idx] 也同理，取出对应分量的标准差。
+    """
+    sigma = stds[b, idx]  
     eps = torch.randn_like(mu, generator=generator)  # ε~N(0,1)
-    return mu + sigma*eps
+    
+    """
+    torch.randn 抽出标准正态 ε——中心 0、宽度 1 的“白坯沙粒”；
+    × σ：把白坯拉伸到这座堆自己的宽度（σ=0.003 就贴着中心，σ=0.04 就撒得开）；
+    + μ：把撒好的沙粒平移到这座堆的中心
+    """
+    return mu + sigma*eps   #a = μ + σ·ε 是高斯采样的标准技巧，值得彻底拆开
+   
     
 
 def mdn_policy_fn(model, seed=0):
@@ -399,7 +426,7 @@ def mdn_policy_fn(model, seed=0):
 # 第五部分：附加 TODO-4（选做）—— 动作离散化 + 分类头
 # ============================================================
 
-# 17 个动作 bin：16 个方向（步长 0.1，22.5° 一档）+ 静止
+# 17 个动作 bin：16 个方向（步长 0.1，22.5° 一档）+ 静止（一维数组）
 ACTION_BINS = [[0.0, 0.0]] + [
     [round(math.cos(a) * 0.1, 6), round(math.sin(a) * 0.1, 6)]
     for a in [i * math.pi / 8 for i in range(16)]
@@ -416,7 +443,7 @@ def discrete_pipeline(X, Y, epochs=80):
     4) 推理：probs=softmax(logits) → torch.multinomial 抽一个 bin → 返回其动作
     跑分标准：成功率 ≥ 90%（参考解答实测 96%，见 solutions.md）。
     """
-    bins = torch.tensor(ACTION_BINS, dtype=torch.float32)            # (17, 2)
+    bins = torch.tensor(ACTION_BINS, dtype=torch.float32)            # (17, 2)，在这里彻底转换成张量，方便后续return ACTION_BINS[idx]
     d2 = ((Y.unsqueeze(1) - bins.unsqueeze(0)) ** 2).sum(-1)         # (N, 17)
     labels = d2.argmin(dim=1)                                        # 每个动作归最近 bin
 
